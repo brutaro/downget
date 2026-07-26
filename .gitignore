@@ -1,0 +1,9 @@
+/target/
+.DS_Store
+
+# Local orchestration state and audit traces.
+/.maestri/
+/.nirvana/
+
+# Planning scratchpad; the canonical PRD is versioned.
+docs/planning/**/.memlog.md
