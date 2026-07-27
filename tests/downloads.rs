@@ -22,6 +22,10 @@ use downget::{
 enum RangeMode {
     Supported,
     Unsupported,
+    HtmlLanding,
+    ZipWithoutRange,
+    ForbiddenProbe,
+    UnauthorizedProbe,
     InvalidProof,
     SimpleRetryOnce,
     ThrottleRangeOnce,
@@ -40,6 +44,7 @@ enum RangeMode {
     ProbeNetworkFailureOnce,
     UnknownRangeTotal,
     WorkerReturns200,
+    WorkerHtmlAfterProof,
     WorkerReturns416,
     WorkerInvalidContentRange,
 }
@@ -138,6 +143,21 @@ fn serve(
     }
 
     let (status, response_body, extra) = match (mode, range) {
+        (RangeMode::ZipWithoutRange, _) => (
+            "200 OK",
+            body.to_vec(),
+            "Content-Type: application/zip\r\nContent-Disposition: attachment; filename=folder.zip\r\n"
+                .into(),
+        ),
+        (RangeMode::ForbiddenProbe, Some(_)) => ("403 Forbidden", Vec::new(), String::new()),
+        (RangeMode::UnauthorizedProbe, Some(_)) => {
+            ("401 Unauthorized", Vec::new(), String::new())
+        }
+        (RangeMode::HtmlLanding, _) => (
+            "200 OK",
+            b"<!doctype html><title>OneDrive landing</title>".to_vec(),
+            "Content-Type: text/html; charset=utf-8\r\n".into(),
+        ),
         (RangeMode::ProbeThrottleOnce, Some(range))
             if range == "bytes=0-0" && attempts.fetch_add(1, Ordering::Relaxed) == 0 =>
         {
@@ -188,6 +208,18 @@ fn serve(
         (RangeMode::WorkerReturns200, Some(range)) if range != "bytes=0-0" => {
             ("200 OK", body.to_vec(), String::new())
         }
+        (RangeMode::WorkerHtmlAfterProof, Some(range)) if range != "bytes=0-0" => {
+            let (start, end) = parse_range(&range, body.len() as u64);
+            let end = end.min(body.len() as u64 - 1);
+            (
+                "206 Partial Content",
+                body[start as usize..=end as usize].to_vec(),
+                format!(
+                    "Content-Type: application/xhtml+xml\r\nContent-Range: bytes {start}-{end}/{}\r\n",
+                    body.len()
+                ),
+            )
+        }
         (RangeMode::WorkerReturns416, Some(range)) if range != "bytes=0-0" => {
             ("416 Range Not Satisfiable", Vec::new(), String::new())
         }
@@ -215,6 +247,7 @@ fn serve(
         }
         (
             RangeMode::WorkerReturns200
+            | RangeMode::WorkerHtmlAfterProof
             | RangeMode::WorkerReturns416
             | RangeMode::WorkerInvalidContentRange,
             Some(range),
@@ -470,6 +503,88 @@ fn a_200_range_probe_falls_back_to_a_single_simple_download() {
     let requests = fixture.requests.lock().unwrap();
     assert_eq!(requests.as_slice(), ["bytes=0-0", "no-range"]);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn html_landing_page_is_rejected_before_a_part_file_is_created() {
+    let fixture = Fixture::start(RangeMode::HtmlLanding, Vec::new());
+    let root = temporary_root("html-landing");
+    let state = root.join("state");
+    let destination = root.join("landing.bin");
+    let output = run_add(&fixture.url(), &state, &destination);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("página HTML de aterrissagem"));
+    assert!(!destination.exists());
+    assert!(!root.join("landing.bin.part").exists());
+    assert!(Store::open(state).unwrap().job(1).is_err());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn onedrive_folder_landing_guidance_is_actionable_and_never_includes_a_token() {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::CONTENT_TYPE,
+        "text/html; charset=utf-8".parse().unwrap(),
+    );
+    let candidate =
+        "https://onedrive.live.com/download?authkey=SENTINEL_ONEDRIVE_TOKEN&ithint=folder";
+    let message = source::onedrive_delivery_error(source::OneDriveItem::Folder, &headers).unwrap();
+    let rendered_error = format!("Erro: {message}");
+    assert!(rendered_error.contains("pasta"));
+    assert!(rendered_error.contains("ZIP público"));
+    assert!(rendered_error.contains("compartilhamento público"));
+    assert!(!rendered_error.contains("SENTINEL_ONEDRIVE_TOKEN"));
+    assert!(source::is_onedrive_download_url(candidate));
+}
+
+#[test]
+fn zip_without_range_is_downloaded_as_a_regular_simple_file() {
+    let body = b"PK\x03\x04local folder archive".to_vec();
+    let fixture = Fixture::start(RangeMode::ZipWithoutRange, body.clone());
+    let root = temporary_root("zip-without-range");
+    let output = run_add(
+        &fixture.url(),
+        &root.join("state"),
+        &root.join("folder.zip"),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read(root.join("folder.zip")).unwrap(), body);
+    assert_eq!(
+        fixture.requests.lock().unwrap().as_slice(),
+        ["bytes=0-0", "no-range"]
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn authentication_probe_failures_create_no_part_and_redact_the_supplied_query() {
+    for (mode, code) in [
+        (RangeMode::ForbiddenProbe, "403"),
+        (RangeMode::UnauthorizedProbe, "401"),
+    ] {
+        let fixture = Fixture::start(mode, Vec::new());
+        let root = temporary_root(&format!("auth-probe-{code}"));
+        let state = root.join("state");
+        let destination = root.join("private.bin");
+        let secret = format!("SENTINEL_PROBE_{code}");
+        let sensitive_url = format!("{}?token={secret}", fixture.url());
+        let output = run_add(&sensitive_url, &state, &destination);
+        assert!(!output.status.success(), "{code}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(&format!("retornou {code}")),
+            "{code}"
+        );
+        assert!(!String::from_utf8_lossy(&output.stderr).contains(&secret));
+        assert!(!destination.exists());
+        assert!(!root.join("private.bin.part").exists());
+        assert!(Store::open(state).unwrap().job(1).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[tokio::test]
@@ -902,6 +1017,27 @@ fn worker_200_after_valid_proof_stops_without_final_file() {
             .unwrap()
             .state,
         JobState::RequiresReinspect
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn html_after_a_valid_range_proof_is_never_written_or_promoted() {
+    let fixture = Fixture::start(
+        RangeMode::WorkerHtmlAfterProof,
+        vec![0x68; 16 * 1024 * 1024 + 5],
+    );
+    let root = temporary_root("worker-html");
+    let state = root.join("state");
+    let destination = root.join("unsafe.html");
+    let output = run_add(&fixture.url(), &state, &destination);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("página HTML de aterrissagem"));
+    assert!(!destination.exists());
+    assert!(root.join("unsafe.html.part").exists());
+    assert_eq!(
+        Store::open(state).unwrap().job(1).unwrap().state,
+        JobState::FailedTerminal
     );
     std::fs::remove_dir_all(root).unwrap();
 }

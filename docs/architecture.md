@@ -22,7 +22,7 @@ O enquadramento Nirvana-OS/Software Forge é usado como gate de arquitetura: est
 | Discovery e especificação | Encerradas pelo HANDOFF e PRD aprovados. |
 | Arquitetura | Este documento fixa as fronteiras que o build não pode reinterpretar. |
 | Build | Implementar os módulos, contratos e invariantes abaixo; não ampliar o escopo. |
-| Teste | Demonstrar AC-1 a AC-19 no servidor HTTP local e submeter a evidência ao Sentinel. |
+| Teste | Demonstrar AC-1 a AC-20 no servidor HTTP local e submeter a evidência ao Sentinel. |
 
 ## 2. Decisões vinculantes
 
@@ -114,6 +114,14 @@ O enquadramento Nirvana-OS/Software Forge é usado como gate de arquitetura: est
 
 **Regra:** sob lease, ela confirma todos os Segmentos, sincroniza o `.part`, valida tamanho quando conhecido e SHA-256 quando esperado, revalida que o destino não existe, faz rename no mesmo diretório e sincroniza o diretório. O banco só vira `completed` depois do rename; na recuperação, `finalizing` com destino existente exige nova validação antes de reconciliar para concluído.
 
+### AD-12 — OneDrive público tem uma única tentativa de compatibilidade allowlisted
+
+**Vincula:** `SourceProbe` reconhece link público `1drv.ms`/OneDrive, acompanha redirects HTTP(S) e, somente em memória, classifica `ithint=file` como item e `ithint=folder` como pasta. A única URL sintética permitida é construída **somente da primeira `Location` HTTPS observada na cadeia** quando seu host for exatamente `onedrive.live.com` e seu path exatamente `/redir`: trocar apenas o path canônico por `/download` e preservar a query original somente em memória. Não há conversão de `Location` posterior, outro host/path nem segunda tentativa sintética; é uma compatibilidade best-effort, não uma API garantida.
+
+**Evita:** tratar landing page HTML como arquivo, transformar uma classificação em autorização, reescrever endpoint arbitrário, gerar ZIP, navegar em pasta ou contornar compartilhamento restrito.
+
+**Regra:** a admissão ocorre antes de `part_file` reservar `.part`. Para item, a resposta à tentativa só prossegue se `Content-Disposition` tiver disposição `attachment` e não for HTML. Para pasta, só prossegue se for `attachment` ZIP verificável por `Content-Type` e/ou filename seguro `.zip` e, quando corpo ou amostra estiver disponível para admissão, por assinatura/conteúdo ZIP coerente. `401`/`403`, HTML, ausência de classificação, host/path fora da allowlist, `Content-Disposition` ausente/conflitante, ZIP não verificável ou outra resposta ambígua encerram sem `.part`. Nenhum caso usa cookies, `Authorization`, OAuth, Graph, Keychain ou bypass; a ação segura é tornar o compartilhamento público/habilitar download e fornecer URL direta do arquivo ou URL pública do ZIP. Query/tokens de toda a cadeia — inclusive os preservados na troca `/redir → /download` — são efêmeros e passam pelo redator da AD-7; o exemplo `ithint=folder` que retorna 403 sem sessão é rejeitado, sem bypass.
+
 ## 3. Forma do sistema
 
 ```mermaid
@@ -140,7 +148,7 @@ flowchart LR
 | `config` | Lê/grava `concurrency` global no SQLite; aplica 2 a novos Jobs sem configuração. | Alterar concorrência de Job já criado. |
 | `store` | Migra schema, executa transações, expõe snapshots e é o único escritor do estado persistente. | Fazer rede ou decidir retry. |
 | `lease` | Cria/abre o arquivo de lock e tenta lock exclusivo não bloqueante. | Guardar estado do Job. |
-| `source` | Segue redirects, classifica retenção da URL, coleta metadados e faz a prova de Range. | Persistir URL sensível. |
+| `source` | Segue redirects, classifica retenção da URL e `1drv.ms` (`file`/`folder`), executa no máximo a única conversão allowlisted `/redir → /download`, admite `attachment` não HTML/ZIP verificável, coleta metadados e faz a prova de Range. | Persistir URL sensível, reescrever outro endpoint, gerar ZIP, usar cookies/OAuth/Graph/Keychain ou interpretar HTML. |
 | `identity` | Normaliza e compara a Identidade da Fonte; produz discrepância pública sem URL. | Decidir se deve descartar parcial. |
 | `transfer` | Supervisiona modo simples/segmentado, workers, cancelamento cooperativo, redução de concorrência e retry. | Formatar CLI ou acessar SQL diretamente. |
 | `part_file` | Reserva `.part`, faz `write_all_at`, `sync_data`, valida tamanho, SHA-256 e rename final. | Escolher intervalos HTTP. |
@@ -153,7 +161,7 @@ O único fluxo de mutação é `app → store` para transições e `transfer →
 
 | Comando | Contrato de execução | Resultado observável |
 | --- | --- | --- |
-| `downget add <URL> [--output …] [--sha256 …]` | Valida HTTP(S), resolve/reserva destino sem sobrescrever, cria Job, inspeciona a Fonte e transfere no processo atual. | Imprime ID antes do progresso; 0 após finalização, 1 após estado de falha preservado, 2 para argumento/destino inválido. |
+| `downget add <URL> [--output …] [--sha256 …]` | Valida HTTP(S), resolve/reserva destino sem sobrescrever, cria Job, inspeciona a Fonte e transfere no processo atual. Para `1drv.ms`, admite antes de criar `.part` somente a tentativa allowlisted de `onedrive.live.com/redir → /download` e resposta de item `attachment` não HTML ou pasta ZIP verificável. | Imprime ID antes do progresso; 0 após finalização, 1 após estado de falha preservado, 2 para argumento/destino inválido ou rejeição de admissão OneDrive. |
 | `downget list` | Lê snapshot SQLite sem lease. | ID, destino, estado, progresso se houver e próxima ação; nunca Fonte, token, cookie ou header. |
 | `downget resume <ID> [--url …] [--sha256 …]` | Obtém lease, valida checksum sem permitir troca, exige URL nova para `replacement_required`, reinspeciona e valida identidade antes de qualquer byte reutilizado. | Para simples falho, anuncia descarte seguro e reinício do byte zero; para identidade divergente, preserva parcial e retorna erro acionável. |
 | `downget cancel <ID> [--discard]` | Pausa Job local ou pede parada ao dono ativo; `--discard` só continua depois de parada e lease confirmados. | Sem flag preserva `.part`/estado. Com flag é irreversível; em timeout de parada, retorna erro e não apaga nada. |
@@ -184,7 +192,7 @@ O diretório de dados é criado com permissões do usuário atual. O produto nã
 | Tabela | Campos essenciais | Invariante |
 | --- | --- | --- |
 | `settings` | `key` (PK), `value`, `updated_at` | Só há `concurrency`; inteiro 1–8. |
-| `jobs` | `id`, `dest_path`, `part_path`, `state`, `transfer_mode`, `requested_concurrency`, `effective_concurrency`, `parallelism_note`, `url_mode`, `safe_url?`, `source_display`, `size?`, `etag?`, `last_modified?`, `identity_kind`, `sha256_expected?`, `retry_summary`, `last_error_code`, `last_error_action`, `active_run_id?`, `control_seq`, `control_request?`, `control_ack_seq`, timestamps | Não contém URL efêmera, cookies, headers ou tokens. `effective_concurrency` pertence ao Job e sobrevive a redução. |
+| `jobs` | `id`, `dest_path`, `part_path`, `state`, `transfer_mode`, `source_kind?` (`generic`, `onedrive_file`, `onedrive_folder_zip`), `requested_concurrency`, `effective_concurrency`, `parallelism_note`, `url_mode`, `safe_url?`, `source_display`, `size?`, `etag?`, `last_modified?`, `identity_kind`, `sha256_expected?`, `retry_summary`, `last_error_code`, `last_error_action`, `active_run_id?`, `control_seq`, `control_request?`, `control_ack_seq`, timestamps | Não contém URL efêmera, cookies, headers ou tokens. `source_kind` não contém a URL nem parâmetros de redirecionamento. `effective_concurrency` pertence ao Job e sobrevive a redução. |
 | `segments` | `job_id`, `ordinal`, `start`, `end`, `committed_end`, `state`, `attempts_used`, `last_error_code` | Intervalos de um Job não se sobrepõem; `start-1 ≤ committed_end ≤ end`; status concluído implica `committed_end = end`. |
 | `schema_migrations` | `version`, `applied_at` | Migração é idempotente e transacional. |
 
@@ -220,7 +228,7 @@ stateDiagram-v2
 
 ### 4.4 Escrita atômica e recuperação após queda
 
-1. `add` valida URL/destino e cria uma linha `initializing`; cria o `.part` com criação exclusiva; se uma etapa falhar, remove a linha ainda não ativa e nunca sobrescreve arquivo existente.
+1. `add` valida URL/destino e cria uma linha `initializing`. Para o caminho `1drv.ms`/OneDrive, `SourceProbe` conclui a admissão da AD-12 antes de `part_file` criar `.part`; host/path fora da allowlist, 401/403, HTML ou ambiguidade deixam esse arquivo ausente. Depois da admissão, cria o `.part` com criação exclusiva; se uma etapa falhar, remove a linha ainda não ativa e nunca sobrescreve arquivo existente.
 2. Todo checkpoint de progresso segue: `write_all_at` → `sync_data(.part)` → transação SQLite que avança somente o prefixo confirmado.
 3. Toda mudança de estado, tentativa, identidade, controle ou configuração é uma transação SQLite curta. Escrita de arquivo nunca ocorre dentro da transação.
 4. No início de qualquer comando mutante, o recuperador toma o lease. Se ele encontrar `active_run_id` sem lease ocupado, trata o processo anterior como encerrado, preserva os últimos checkpoints e move o Job para `paused`/razão apropriada; não presume que bytes não confirmados existem.
@@ -257,6 +265,20 @@ O primeiro `Ctrl+C` segue o mesmo caminho de pausa, com razão `interrupted`: bl
 | total desconhecido | Não cria Segmentos; fecha/descarta corpo e inicia simples do byte zero. |
 | 416 ou outro erro | Não aceita corpo; classifica por retry/erro terminal. |
 
+### 6.1.1 Resolução pública `1drv.ms`/OneDrive
+
+Antes da prova de Range, `SourceProbe` examina a cadeia de redirects somente em memória. Ao identificar `1drv.ms`/OneDrive, lê `ithint=file` ou `ithint=folder` da URL de redirecionamento para definir `source_kind`; a URL completa não sai do módulo `source` nem é gravada. Ausência de `ithint` confiável não é inferida por HTML. A única exceção à regra de não inferir endpoint é: a **primeira `Location` HTTPS observada na cadeia**, e somente ela, com host exato `onedrive.live.com` e path exato `/redir`, pode gerar uma única requisição a `https://onedrive.live.com/download` com a mesma query ainda apenas em memória. Redirects posteriores podem ser seguidos como redirects HTTP normais, mas nunca reescritos; não há segunda URL sintética.
+
+| Situação de admissão | Decisão |
+| --- | --- |
+| Primeira `Location` HTTPS é `onedrive.live.com` + `/redir`; `ithint=file`; resposta tem `Content-Disposition: attachment` e não é HTML | Faz a única tentativa `/redir → /download` e, se admitida, segue para inspeção normal e prova de Range/Transferência Simples. |
+| Primeira `Location` HTTPS é `onedrive.live.com` + `/redir`; `ithint=folder`; resposta é `attachment` ZIP verificável por tipo/filename e, quando aplicável, conteúdo ZIP | Faz a única tentativa `/redir → /download`, trata o ZIP como Fonte de um arquivo e segue para inspeção normal. |
+| Primeira `Location` HTTPS tem host/path diferente, ou uma `Location` posterior seria a candidata | Falha sem converter endpoint, sem segunda tentativa e antes de criar Arquivo Parcial. |
+| `text/html`/landing page, `Content-Disposition` ausente ou conflitante, ZIP não verificável ou outra resposta ambígua | Rejeita antes de criar Arquivo Parcial ou transferidor; pede URL pública direta do arquivo ou do ZIP. |
+| 401/403, compartilhamento restrito ou download bloqueado | Rejeita antes de criar Arquivo Parcial, sem retry autenticado, cookie, OAuth, Graph ou Keychain; pede tornar o compartilhamento público/habilitar download e fornecer URL adequada. |
+
+O caso conhecido em que o redirect traz `ithint=folder` e a resposta final é 403 sem sessão cai na última linha: o marcador permite explicar que se trata de pasta, mas não autoriza acesso nem fallback.
+
 Em um worker segmentado, cada resposta precisa ser `206`, ter intervalo e total exatamente iguais ao solicitado e, quando `Content-Length` existir, tamanho igual ao intervalo. Corpo curto, longo ou inválido não atualiza `committed_end`. `200`, `Content-Range` inválido e `416` depois de segmentar produzem `requires_reinspect`, preservam `.part` e não fazem fallback automático na mesma execução.
 
 ### 6.2 Planejamento e paralelismo
@@ -286,6 +308,7 @@ Transferência Simples não registra segmentos nem tenta Range para retomar. Qua
 | --- | --- |
 | timeout, erro transitório de transporte, 408, 429, 5xx | Retry pelo orçamento de cinco, com espera cancelável e `Retry-After`. |
 | 403 em Fonte efêmera | Pausa como `awaiting_url`; informa `resume <ID> --url <NOVA_URL>` sem imprimir a URL. |
+| `1drv.ms`/OneDrive com 401/403, HTML, host/path fora da allowlist, `attachment` ambíguo, ZIP não verificável, acesso restrito ou download bloqueado | Falha segura antes de `.part`, sem segunda URL sintética nem cookies/OAuth/Graph/Keychain/bypass; informa URL pública direta do arquivo ou URL pública ZIP da pasta, conforme `source_kind` quando disponível. |
 | 4xx não recuperável | Falha terminal preservada; sem retry automático. |
 | 200/Content-Range inválido/416 no worker de Range | `requires_reinspect`; nenhum byte da resposta é aceito. |
 | checksum ou tamanho inválido | `failed_terminal`; `.part` e metadados ficam para diagnóstico/descarte explícito. |
@@ -295,6 +318,7 @@ Transferência Simples não registra segmentos nem tenta Range para retomar. Qua
 ### 7.2 Redação obrigatória
 
 - Nunca registrar URL crua efêmera, query, fragmento, userinfo, `Authorization`, `Cookie`, `Set-Cookie` ou cabeçalho de autenticação.
+- O valor de `ithint` pode orientar `source_kind`, mas a URL de redirecionamento `1drv.ms`/OneDrive — inclusive a query copiada somente em memória na tentativa `/redir → /download` — e seus tokens nunca entram em SQLite, `list`, logs ou mensagens.
 - Redator é aplicado na entrada de logs, erros HTTP, persistência e renderização de `list`; não depende de cada chamador lembrar de esconder um campo.
 - Headers usados na identidade são extraídos para campos específicos (`ETag`, tamanho, data) e o conjunto completo de headers não é persistido.
 - Progresso usa `stderr`; `stdout` fica reservado a saídas estáveis que podem ser automatizadas no futuro, sem valores sensíveis.
@@ -303,9 +327,9 @@ Transferência Simples não registra segmentos nem tenta Range para retomar. Qua
 
 `--output` tem precedência. Nome derivado de `Content-Disposition` só é aceito se for um nome de arquivo simples após remover separadores, controle, `..`, nomes vazios e caminhos absolutos; caso contrário, o fallback é `download-<id>`. A criação exclusiva do `.part` protege o início; a rechecagem do destino imediatamente antes do rename protege a promoção.
 
-## 8. Plano de testes local — AC-1 a AC-19
+## 8. Plano de testes local — AC-1 a AC-20
 
-O build deve ter um servidor HTTP local de fixture, controlado por cenário, e testes de integração que invoquem o binário em diretórios temporários. O fixture registra métodos, ranges, simultaneidade, atrasos e corpos enviados; ele nunca precisa de serviço externo ou OneDrive.
+O build deve ter um servidor HTTP local de fixture, controlado por cenário, e testes de integração que invoquem o binário em diretórios temporários. O fixture registra métodos, ranges, simultaneidade, atrasos, redirects e corpos enviados; ele simula `1drv.ms`/OneDrive sem serviço externo.
 
 | AC | Cenário local e asserção de arquitetura |
 | --- | --- |
@@ -328,8 +352,9 @@ O build deve ter um servidor HTTP local de fixture, controlado por cenário, e t
 | AC-17 | `retry_exhaustion_persists_and_resume_never_sends_a_sixth_simple_request` e os cenários de `Retry-After` 429/503. |
 | AC-18 | `list_covers_all_job_states_with_safe_next_actions_and_no_source_leak`. |
 | AC-19 | `parallel_429_reduces_concurrency_and_is_visible_in_list` e `parallel_503_reduces_concurrency_waits_and_persists_the_list_note`. |
+| AC-20 | Fixture simula que a **primeira `Location` HTTPS** é `onedrive.live.com/redir` com query sentinela: somente uma requisição sintética `/download` é feita, sem persistir/imprimir a query. Para `ithint=file`, aceita apenas `Content-Disposition: attachment` não HTML; para `ithint=folder`, aceita apenas `attachment` ZIP verificável por tipo/filename e, quando aplicável, conteúdo ZIP. Depois simula 401/403, HTML, host/path fora da allowlist e resposta ambígua; nenhum cria `.part`, gera segunda URL sintética ou usa cookies/OAuth/Graph/Keychain/bypass, e toda URL com query/token permanece ausente de estado, saída e logs. |
 
-Ordem mínima de implementação/teste: (1) schema, CLI e fixture; (2) simples + checkpoints + SIGINT; (3) prova de Range e Segmentos; (4) identidade, URL efêmera, cancelamento entre processos e descarte; (5) finalização/SHA-256, privacidade e matriz AC completa. Antes do handoff de código, o Sentinel deve receber os resultados de `cargo test`, a matriz AC preenchida e a evidência de que não há token sentinela nos artefatos gerados.
+Ordem mínima de implementação/teste: (1) schema, CLI e fixture; (2) simples + checkpoints + SIGINT; (3) prova de Range e Segmentos; (4) identidade, URL efêmera, cancelamento entre processos e descarte; (5) resolução pública `1drv.ms`/OneDrive, finalização/SHA-256, privacidade e matriz AC completa. Antes do handoff de código, o Sentinel deve receber os resultados de `cargo test`, a matriz AC preenchida e a evidência de que não há token sentinela nos artefatos gerados.
 
 ## 9. Riscos de implementação a tratar no build
 
@@ -341,19 +366,20 @@ Ordem mínima de implementação/teste: (1) schema, CLI e fixture; (2) simples +
 | Resposta 200 consumida como Range | Descartar corpo da sonda; após segmentação, não fazer fallback automático no mesmo processo. |
 | `ETag` fraco ou identidade incompleta | Não usar como autorização para reaproveitar Segmentos. |
 | URL em mensagem de biblioteca | Sanitizar na borda de `source`/`ui`; testes AC-10 e AC-18 usam valor sentinela. |
+| Compatibilidade OneDrive confundida com API/autorização | Reescrever somente a primeira `Location` HTTPS com host exato `onedrive.live.com` e path exato `/redir`, uma vez e em memória; exigir `attachment` não HTML/ZIP verificável. HTML, 401/403, host/path fora da allowlist ou ambiguidade falham sem `.part` e nunca gatilham cookies, OAuth, Graph, Keychain ou bypass. |
 | Rename e crash na promoção | Usar mesmo diretório, fsync de diretório e recuperação de `finalizing` com validação repetida. |
 | Volume de destino não confiável | O MVP suporta caminhos locais acessíveis pelo processo; sem prometer durabilidade adicional em volumes de rede. |
 
 ## 10. Fora da arquitetura do MVP
 
 - Daemon, socket de controle, watcher de pasta, agendador persistente ou execução em segundo plano.
-- OAuth, cookies, Keychain, headers customizados, extensão de navegador ou suporte universal a links OneDrive.
+- OAuth, cookies, Keychain, headers customizados, extensão de navegador, scraping de landing page HTML ou suporte universal/autenticado a links OneDrive. O único recorte aceito é `1drv.ms` público que passa na admissão `attachment` não HTML/ZIP verificável, inclusive pela única tentativa best-effort allowlisted `onedrive.live.com/redir → /download`.
 - Servidores alternativos, abstrações de storage/HTTP plugáveis, espelhos, BitTorrent, HLS, FTP ou SFTP.
 - Ajuste automático sofisticado de segmentos ou de throughput. A única adaptação é reduzir a concorrência a 1 sob rejeição HTTP paralela definida na seção 6.2.
 
 ## 11. Próximo passo
 
-O build deve seguir esta arquitetura sem reabrir requisitos. Ao concluir cada marco de implementação, o construtor atualiza a evidência dos AC correspondentes e só encaminha código ao Sentinel quando a matriz AC-1 a AC-19 estiver completa.
+O build deve seguir esta arquitetura sem reabrir requisitos. Ao concluir cada marco de implementação, o construtor atualiza a evidência dos AC correspondentes e só encaminha código ao Sentinel quando a matriz AC-1 a AC-20 estiver completa.
 
 ### Pins de compatibilidade testados neste ambiente
 

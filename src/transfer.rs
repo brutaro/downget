@@ -18,7 +18,7 @@ use crate::{
     model::{Job, Segment, TransferMode},
     part_file::PartFile,
     retry::{self, RetryClass, MAX_ATTEMPTS},
-    source::parse_content_range,
+    source::{self, parse_content_range},
     store::Store,
     ui, Error, Result,
 };
@@ -27,7 +27,7 @@ use crate::{
 pub enum TransferOutcome {
     Completed,
     Paused,
-    AwaitingUrl,
+    AwaitingUrl { one_drive_public: bool },
     RequiresReinspect,
     Failed(String),
 }
@@ -127,6 +127,15 @@ async fn run_simple(
         let status = response.status();
         let retry_after = retry::retry_after_header(response.headers());
         if status.is_success() {
+            if let Some(item) = source::onedrive_item_from_download_url(url) {
+                if let Some(message) = source::onedrive_delivery_error(item, response.headers()) {
+                    return Ok(TransferOutcome::Failed(message.into()));
+                }
+            } else if source::is_html_content_type(response.headers()) {
+                return Ok(TransferOutcome::Failed(
+                    source::html_landing_page_message().into(),
+                ));
+            }
             let mut response = response;
             loop {
                 let chunk = match tokio::select! {
@@ -157,7 +166,11 @@ async fn run_simple(
             return Ok(TransferOutcome::Completed);
         }
         match retry::classify_status(status, false, ephemeral) {
-            RetryClass::Forbidden => return Ok(TransferOutcome::AwaitingUrl),
+            RetryClass::Forbidden => {
+                return Ok(TransferOutcome::AwaitingUrl {
+                    one_drive_public: source::is_onedrive_download_url(url),
+                })
+            }
             RetryClass::Terminal | RetryClass::RequiresReinspect => {
                 return Ok(TransferOutcome::Failed(format!("HTTP {}", status.as_u16())))
             }
@@ -234,9 +247,11 @@ async fn run_segmented(context: RunContext<'_>, part: &PartFile) -> Result<Trans
                 SegmentOutcome::Paused => {
                     set_terminal(&mut terminal, TransferOutcome::Paused, &cancel)
                 }
-                SegmentOutcome::AwaitingUrl => {
-                    set_terminal(&mut terminal, TransferOutcome::AwaitingUrl, &cancel)
-                }
+                SegmentOutcome::AwaitingUrl { one_drive_public } => set_terminal(
+                    &mut terminal,
+                    TransferOutcome::AwaitingUrl { one_drive_public },
+                    &cancel,
+                ),
                 SegmentOutcome::RequiresReinspect => {
                     set_terminal(&mut terminal, TransferOutcome::RequiresReinspect, &cancel)
                 }
@@ -281,7 +296,7 @@ enum SegmentOutcome {
     Completed,
     Cancelled,
     Paused,
-    AwaitingUrl,
+    AwaitingUrl { one_drive_public: bool },
     RequiresReinspect,
     Failed(String),
     ReduceConcurrency(Segment, Duration),
@@ -397,6 +412,17 @@ async fn segment_worker(context: SegmentContext, segment: Segment) -> Result<Seg
         };
         let status = response.status();
         let retry_after = retry::retry_after_header(response.headers());
+        if status.is_success() {
+            if let Some(item) = source::onedrive_item_from_download_url(&url) {
+                if let Some(message) = source::onedrive_delivery_error(item, response.headers()) {
+                    return Ok(SegmentOutcome::Failed(message.into()));
+                }
+            } else if source::is_html_content_type(response.headers()) {
+                return Ok(SegmentOutcome::Failed(
+                    source::html_landing_page_message().into(),
+                ));
+            }
+        }
         if allow_parallelism_reduction
             && (status == StatusCode::TOO_MANY_REQUESTS
                 || status == StatusCode::SERVICE_UNAVAILABLE)
@@ -411,7 +437,11 @@ async fn segment_worker(context: SegmentContext, segment: Segment) -> Result<Seg
         }
         if status != StatusCode::PARTIAL_CONTENT {
             match retry::classify_status(status, true, ephemeral) {
-                RetryClass::Forbidden => return Ok(SegmentOutcome::AwaitingUrl),
+                RetryClass::Forbidden => {
+                    return Ok(SegmentOutcome::AwaitingUrl {
+                        one_drive_public: source::is_onedrive_download_url(&url),
+                    })
+                }
                 RetryClass::RequiresReinspect => {
                     requires_reinspect.store(true, Ordering::SeqCst);
                     cancel.cancel();

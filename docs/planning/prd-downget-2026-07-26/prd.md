@@ -12,13 +12,13 @@ canonical_handoff: "../../../HANDOFF.md"
 
 Este PRD torna verificável o escopo canônico de [HANDOFF.md](../../../HANDOFF.md) para quem fará a arquitetura, a implementação e os testes do `downget`. Ele descreve o comportamento observável do produto; não escolhe formato de persistência, bibliotecas ou estrutura interna quando essas escolhas não são necessárias para o usuário obter o resultado.
 
-O produto está no fluxo Software Forge **discovery → especificação → arquitetura → build → teste**. Este documento cobre especificação e não autoriza código nesta etapa. As decisões de cancelamento, URL assinada, checksum, Fonte sem intervalos, nome de destino, detecção de intervalos, retry, configuração e testes locais estão fechadas. A nota `downget-direcionamento-de` foi reconciliada sem impacto de escopo. Em qualquer conflito, o `HANDOFF.md` permanece a fonte canônica.
+O produto está no fluxo Software Forge **discovery → especificação → arquitetura → build → teste**. Este documento cobre especificação e não autoriza código nesta etapa. As decisões de cancelamento, URL assinada, checksum, Fonte sem intervalos, nome de destino, detecção de intervalos, retry, configuração, testes locais e links públicos `1drv.ms`/OneDrive estão fechadas. A nota `downget-direcionamento-de` foi reconciliada sem impacto de escopo. Em qualquer conflito, o `HANDOFF.md` permanece a fonte canônica.
 
 ## 1. Problema e tese de produto
 
 Downloads grandes por HTTP(S) falham em conexões instáveis e frequentemente deixam o usuário sem uma forma confiável de continuar do ponto em que parou. A falha é especialmente frustrante quando o arquivo é grande, o servidor limita conexões ou o link recebido é temporário.
 
-O `downget` é um utilitário **CLI-first para macOS** que baixa uma Fonte HTTP(S) direta com prioridade em continuidade e integridade. Quando a Fonte suporta solicitações por intervalo de bytes, ele baixa Segmentos em paralelo de forma conservadora; quando não suporta, informa a limitação e realiza uma transferência simples com reintentos. Em ambos os casos, ele deve comunicar o estado com clareza e jamais apresentar como válido um Arquivo Parcial ou dados de uma Fonte diferente.
+O `downget` é um utilitário **CLI-first para macOS** que baixa uma Fonte HTTP(S) direta, inclusive um link público `1drv.ms`/OneDrive que se resolva para arquivo direto ou ZIP público de pasta, com prioridade em continuidade e integridade. Quando a Fonte suporta solicitações por intervalo de bytes, ele baixa Segmentos em paralelo de forma conservadora; quando não suporta, informa a limitação e realiza uma transferência simples com reintentos. Em ambos os casos, ele deve comunicar o estado com clareza e jamais apresentar como válido um Arquivo Parcial ou dados de uma Fonte diferente.
 
 **Tese do MVP:** a recuperação confiável de um download interrompido vale mais do que aumentar o número de conexões. Por isso, o padrão é duas conexões e a concorrência é limitada a 1–8.
 
@@ -26,7 +26,7 @@ O `downget` é um utilitário **CLI-first para macOS** que baixa uma Fonte HTTP(
 
 ### 2.1 Usuário-alvo
 
-O usuário-alvo é uma pessoa em macOS que trabalha no terminal e precisa transferir um arquivo grande por uma URL HTTP(S) direta, acompanhar o andamento e recuperar o trabalho após uma interrupção.
+O usuário-alvo é uma pessoa em macOS que trabalha no terminal e precisa transferir um arquivo grande por uma URL HTTP(S) direta ou por um link público `1drv.ms`/OneDrive que o provedor resolva sem sessão, acompanhar o andamento e recuperar o trabalho após uma interrupção.
 
 ### 2.2 Jobs to be Done
 
@@ -34,6 +34,7 @@ O usuário-alvo é uma pessoa em macOS que trabalha no terminal e precisa transf
 - Quando o servidor não permite retomada por intervalos, quero saber isso antes de confiar na recuperação automática.
 - Quando recebo um erro de URL expirada ou de servidor, quero uma explicação e o próximo comando seguro a executar.
 - Quando concluo uma transferência, quero confiar que o arquivo tem o tamanho esperado e, se eu fornecer um SHA-256, que ele foi validado antes de ser entregue como final.
+- Quando recebo um link público `1drv.ms`, quero saber se ele representa arquivo ou pasta e qual URL pública direta preciso fornecer, sem que o cliente tente contornar o acesso do provedor.
 
 ### 2.3 Não usuários no MVP
 
@@ -48,10 +49,13 @@ O usuário-alvo é uma pessoa em macOS que trabalha no terminal e precisa transf
 - **UC-3 — retomar após interrupção:** o usuário interrompe o processo e usa o identificador do Job para continuar somente os Segmentos ausentes, depois de validar a Identidade da Fonte.
 - **UC-4 — substituir URL expirada:** após um 403 de URL temporária, o usuário informa uma nova URL em `resume`; o produto reaproveita apenas dados cuja Identidade da Fonte coincida.
 - **UC-5 — diagnosticar e agir:** o usuário consulta a lista de Jobs, identifica o estado e executa a próxima ação indicada sem precisar interpretar logs técnicos.
+- **UC-6 — tratar link público do OneDrive:** o usuário adiciona um link `1drv.ms`; o produto classifica arquivo/pasta pelo redirecionamento e transfere somente arquivo direto ou ZIP público. Se o provedor responder HTML, 403, acesso restrito ou download bloqueado, o produto explica a próxima ação sem tentar autenticar.
 
 ## 3. Glossário
 
-- **Fonte** — recurso HTTP(S) solicitado pelo usuário. Pode envolver URL original, redirecionamentos e URL atual; no MVP, deve ser uma fonte direta e sem autenticação.
+- **Fonte** — recurso HTTP(S) solicitado pelo usuário. Pode envolver URL original, redirecionamentos e URL atual; no MVP, deve ser uma fonte direta sem autenticação ou um link público `1drv.ms`/OneDrive que se resolva para recurso baixável.
+- **Link público OneDrive** — URL `1drv.ms`/OneDrive que o produto só acompanha por redirecionamentos HTTP(S), em memória, para classificar `ithint=file` ou `ithint=folder`. Não implica que o recurso seja acessível.
+- **Landing page HTML** — resposta HTML intermediária ou final de compartilhamento; não é arquivo baixável nem entrada para scraping no MVP.
 - **Identidade da Fonte** — evidência usada para impedir a combinação de versões diferentes do arquivo: `ETag` tem precedência; na ausência dele, tamanho e `Last-Modified` são usados em conjunto quando disponíveis.
 - **Job** — registro persistente de uma transferência, identificado por ID, Fonte, destino, estado, política de retry e número de conexões.
 - **Segmento** — intervalo contíguo de bytes de uma Fonte com suporte a `Range Requests`, com início, fim, bytes concluídos, estado e tentativas.
@@ -72,6 +76,7 @@ O usuário-alvo é uma pessoa em macOS que trabalha no terminal e precisa transf
 - Arquivo Parcial, Estado Persistente, retomada validada e desligamento seguro por `Ctrl+C`.
 - Validação de tamanho; SHA-256 quando fornecido; proteção contra mistura de fontes.
 - Mensagens de terminal, privacidade de valores sensíveis e testes de falhas essenciais.
+- Resolução limitada de links públicos `1drv.ms`/OneDrive: arquivo direto para item e ZIP público para pasta quando o provedor o disponibilizar.
 
 ### 4.2 P1 — somente após o MVP confiável
 
@@ -81,7 +86,7 @@ O usuário-alvo é uma pessoa em macOS que trabalha no terminal e precisa transf
 ### 4.3 Fora de escopo no MVP
 
 - Interface gráfica.
-- Captura automática no navegador, cookies, `Authorization`, OAuth ou integração com API do OneDrive.
+- Captura automática no navegador, cookies, `Authorization`, OAuth, API Graph, integração autenticada com OneDrive ou scraping de landing page HTML.
 - BitTorrent, HLS, FTP, SFTP, download de vídeo e múltiplas URLs espelho.
 - Serviço/daemon em segundo plano.
 
@@ -127,7 +132,7 @@ O ID, o status HTTP e a sugestão podem mudar conforme o contexto; a mensagem n�
 
 #### FR-1 — Adicionar uma Fonte HTTP(S) e resolver destino
 
-O usuário inicia um Job no processo atual com `downget add <URL>` e indica destino com `--output` quando necessário. A Fonte deve ser HTTP(S) direta e não autenticada no MVP. `--output` tem prioridade sobre o nome derivado. Quando o destino for diretório ou não houver arquivo explícito, o produto sanitiza o nome de `Content-Disposition`; sem nome confiável, usa `download-<id>`. O produto não sobrescreve um destino existente. Realiza UC-1 e UC-2.
+O usuário inicia um Job no processo atual com `downget add <URL>` e indica destino com `--output` quando necessário. A Fonte deve ser HTTP(S) direta e não autenticada, ou um link público `1drv.ms`/OneDrive aceito por FR-20. `--output` tem prioridade sobre o nome derivado. Quando o destino for diretório ou não houver arquivo explícito, o produto sanitiza o nome de `Content-Disposition`; sem nome confiável, usa `download-<id>`. O produto não sobrescreve um destino existente. Realiza UC-1, UC-2 e UC-6.
 
 **Consequências verificáveis:**
 
@@ -138,12 +143,27 @@ O usuário inicia um Job no processo atual com `downget add <URL>` e indica dest
 
 #### FR-2 — Seguir redirecionamentos e inspecionar capacidades
 
-Ao adicionar ou retomar uma Fonte, o produto segue redirecionamentos e coleta, quando disponíveis, nome, tamanho, `ETag`, `Last-Modified` e `Accept-Ranges: bytes` como indício. A confirmação de Transferência Segmentada pertence a FR-5 e não pode ser inferida apenas pelo cabeçalho.
+Ao adicionar ou retomar uma Fonte, o produto segue redirecionamentos HTTP(S) e coleta, quando disponíveis, nome, tamanho, `ETag`, `Last-Modified` e `Accept-Ranges: bytes` como indício. Para `1drv.ms`/OneDrive, a classificação específica pertence a FR-20. A confirmação de Transferência Segmentada pertence a FR-5 e não pode ser inferida apenas pelo cabeçalho.
 
 **Consequências verificáveis:**
 
 - Uma cadeia de redirecionamentos chega à Fonte final ou produz erro acionável.
 - A ausência de um metadado não é reportada como se ele tivesse sido validado.
+
+#### FR-20 — Resolver link público `1drv.ms`/OneDrive com compatibilidade estritamente allowlisted
+
+Para URL pública `1drv.ms`/OneDrive, o produto segue redirecionamentos HTTP(S) e classifica, somente em memória, `ithint=file` como item e `ithint=folder` como pasta. A única inferência de endpoint admitida é uma tentativa best-effort de compatibilidade: **somente a primeira `Location` HTTPS observada na cadeia**, se tiver host exato `onedrive.live.com` e path exato `/redir`, pode ter apenas o path canônico convertido para `/download`. A query original é preservada exclusivamente em memória. Não se converte uma `Location` posterior, host/path diferente nem se tenta outro endpoint sintético; a regra não é uma API garantida. O produto não gera ZIP nem interpreta landing page HTML para descobrir download. URLs da cadeia e da tentativa que tenham query ou token permanecem efêmeras, redigidas e nunca são persistidas nem exibidas. Realiza UC-6.
+
+Para item, sucesso exige uma resposta pública não HTML cuja disposição em `Content-Disposition` seja `attachment`. Para pasta, sucesso exige `attachment` de ZIP verificável por `Content-Type` e/ou filename seguro `.zip` e, quando houver corpo ou amostra disponível para admissão, por conteúdo ZIP coerente. `401`/`403`, compartilhamento restrito, download bloqueado, página HTML, host/path fora da allowlist, ausência de classificação confiável, `Content-Disposition` ausente/conflitante ou outra resposta ambígua encerram a tentativa antes de criar Arquivo Parcial. Nenhum desses casos usa cookies, `Authorization`, OAuth, API Graph, Keychain ou bypass. A mensagem orienta, conforme o tipo: tornar o compartilhamento público e habilitar download, então fornecer URL pública direta do arquivo; ou, para pasta, fornecer URL pública do ZIP disponibilizado pelo provedor.
+
+**Consequências verificáveis:**
+
+- Somente a primeira `Location` HTTPS com host exatamente `onedrive.live.com` e path exatamente `/redir` pode originar uma única requisição compatível a `/download`; sua query não sai da memória. Host/path diferente, `Location` posterior ou segunda URL sintética falham sem tentativa alternativa.
+- Redirecionamento que contenha `ithint=file` só é aceito se a resposta de admissão for `attachment` não HTML.
+- Redirecionamento que contenha `ithint=folder` só é aceito se a resposta de admissão for `attachment` ZIP verificável; sem esse recurso, a CLI solicita URL pública do ZIP e não tenta navegar na pasta.
+- Landing page `text/html`, resposta ambígua, 401/403, host/path fora da allowlist ou ZIP não verificável não criam Transferência Simples, Segmento ou Arquivo Parcial.
+- 403 sem sessão — como no exemplo de redirecionamento com `ithint=folder` — é acesso indisponível, não evidência de acesso que o produto possa contornar.
+- Estado Persistente, `list`, mensagens e logs não contêm a URL completa, query, token ou caminho de redirecionamento do OneDrive.
 
 #### FR-3 — Listar Jobs acionáveis
 
@@ -299,9 +319,9 @@ O produto renomeia o Arquivo Parcial para o destino final somente depois das ver
 
 ### 6.5 Privacidade e erros
 
-#### FR-18 — Proteger dados sensíveis e retomar URL assinada sem Keychain
+#### FR-18 — Proteger dados sensíveis e retomar URL efêmera sem Keychain
 
-O produto não expõe tokens, cookies, cabeçalhos sensíveis ou URLs assinadas em saída padrão, logs ou Estado Persistente. URL assinada fica somente em memória e o Estado Persistente mantém apenas marcador/redação. O MVP não persiste URL assinada no Keychain. Depois de qualquer reinício de processo de Job com URL assinada, o usuário deve fornecer `downget resume <ID> --url <NOVA_URL>`, mesmo sem 403; o produto só reaproveita Segmentos depois de validar a Identidade da Fonte.
+O produto não expõe tokens, cookies, cabeçalhos sensíveis, URLs assinadas ou URL que contenha query, fragmento ou userinfo em saída padrão, logs ou Estado Persistente. Essas URLs ficam somente em memória e o Estado Persistente mantém apenas marcador/redação; isso inclui URLs intermediárias de redirecionamento `1drv.ms`/OneDrive e seus tokens. O MVP não persiste URL efêmera no Keychain. Depois de qualquer reinício de processo de Job com URL efêmera, o usuário deve fornecer `downget resume <ID> --url <NOVA_URL>`, mesmo sem 403; o produto só reaproveita Segmentos depois de validar a Identidade da Fonte.
 
 **Consequências verificáveis:**
 
@@ -310,10 +330,11 @@ O produto não expõe tokens, cookies, cabeçalhos sensíveis ou URLs assinadas 
 - O MVP não cria nem consulta entrada de Keychain para URL assinada.
 - `resume` sem `--url` após reinício de Job com URL assinada falha de forma segura e não revela a URL anterior.
 - `resume --url` após reinício não reaproveita Segmentos quando a Identidade da Fonte diverge.
+- Em link `1drv.ms`/OneDrive com query/tokens, a classificação `file`/`folder` e a query preservada para a única tentativa allowlisted `/redir → /download` podem orientar o fluxo somente em memória; nunca fazem a URL completa aparecer ou ser persistida.
 
 #### FR-19 — Explicar erro e próxima ação
 
-Para erros que exigem intervenção — em especial reinício de Job com URL assinada sem `--url`, 403 potencialmente expirado, divergência de Identidade da Fonte, ausência de suporte a intervalos, intervalo inválido/416 e orçamento de retry esgotado — o produto mostra causa resumida e próximo comando ou decisão possível. Realiza UC-4 e UC-5.
+Para erros que exigem intervenção — em especial reinício de Job com URL assinada sem `--url`, 403 potencialmente expirado, divergência de Identidade da Fonte, ausência de suporte a intervalos, intervalo inválido/416, orçamento de retry esgotado e link público OneDrive não baixável — o produto mostra causa resumida e próximo comando ou decisão possível. Para `1drv.ms`/OneDrive, HTML, 401/403, host/path fora da allowlist, resposta ambígua, acesso restrito ou download bloqueado orienta URL pública direta do arquivo ou, se o redirecionamento indicar pasta, URL pública do ZIP; não recomenda cookies, OAuth, Graph, Keychain ou bypass. Realiza UC-4, UC-5 e UC-6.
 
 **Consequências verificáveis:**
 
@@ -333,7 +354,7 @@ O produto deve tolerar as falhas transitórias definidas em FR-13 dentro do limi
 
 ### NFR-3 — Segurança e privacidade
 
-O produto deve tratar como sensíveis cookies, tokens, cabeçalhos de autorização e URLs assinadas, não os exibindo nem persistindo em locais definidos por FR-18. O MVP não tenta autenticar em Fonte privada.
+O produto deve tratar como sensíveis cookies, tokens, cabeçalhos de autorização e URLs com query, fragmento ou userinfo, não os exibindo nem persistindo em locais definidos por FR-18. O MVP não tenta autenticar em Fonte privada, inclusive em OneDrive.
 
 ### NFR-4 — Usabilidade da CLI
 
@@ -345,11 +366,11 @@ O MVP é um binário de linha de comando para macOS. A decisão arquitetural de 
 
 ### NFR-6 — Testabilidade e gate
 
-O produto deve poder ser testado contra servidor HTTP local controlado que simule intervalos, ausência de intervalos, queda de conexão, 429/503, mudança de `ETag`, corrupção, resposta 200 a requisição por intervalo, `Content-Range` inválido, 416, tamanho total desconhecido e rejeição de paralelismo. Antes de entrega de código, a evidência dos critérios AC-1 a AC-19 deve passar pelo gate do Sentinel.
+O produto deve poder ser testado contra servidor HTTP local controlado que simule intervalos, ausência de intervalos, queda de conexão, 429/503, mudança de `ETag`, corrupção, resposta 200 a requisição por intervalo, `Content-Range` inválido, 416, tamanho total desconhecido, rejeição de paralelismo e cadeias públicas simuladas de `1drv.ms`/OneDrive, inclusive a única `Location` HTTPS allowlisted e as falhas de admissão. Antes de entrega de código, a evidência dos critérios AC-1 a AC-20 deve passar pelo gate do Sentinel.
 
 ### 7.1 Plano de testes locais
 
-O servidor HTTP local controlado deve cobrir todo o conjunto AC-1 a AC-19. Além dos cenários base, ele deve exercitar: reinício de processo de Job com URL assinada (AC-14); cancelamento de Job ativo por segundo processo e descarte após parada confirmada (AC-15); confirmação de intervalos e estados seguros para 200, `Content-Range` inválido, 416 e tamanho desconhecido (AC-16); esgotamento do orçamento de retry e `Retry-After` (AC-17); `list` sem dados sensíveis (AC-18); e rejeição de paralelismo com redução ou aviso persistido (AC-19).
+O servidor HTTP local controlado deve cobrir todo o conjunto AC-1 a AC-20. Além dos cenários base, ele deve exercitar: reinício de processo de Job com URL assinada (AC-14); cancelamento de Job ativo por segundo processo e descarte após parada confirmada (AC-15); confirmação de intervalos e estados seguros para 200, `Content-Range` inválido, 416 e tamanho desconhecido (AC-16); esgotamento do orçamento de retry e `Retry-After` (AC-17); `list` sem dados sensíveis (AC-18); rejeição de paralelismo com redução ou aviso persistido (AC-19); e o redirecionamento público `1drv.ms`/OneDrive com a primeira `Location` HTTPS allowlisted, item `attachment` não HTML, pasta ZIP verificável, HTML, 401/403, host/path fora da allowlist e resposta ambígua sem Arquivo Parcial (AC-20).
 
 ## 8. Critérios de aceite verificáveis
 
@@ -374,6 +395,7 @@ O servidor HTTP local controlado deve cobrir todo o conjunto AC-1 a AC-19. Além
 | AC-17 | Em timeout, 408, 429 e 5xx persistentes, cada requisição/Segmento faz no máximo cinco tentativas totais, respeita `Retry-After`, não inicia sexta tentativa e persiste contagem/motivo em estado terminal. | FR-13, FR-14 |
 | AC-18 | `downget list` apresenta ID, destino, estado, progresso quando houver e próxima ação para Jobs ativos, pausados, falhos terminais, concluídos e dependentes de URL; não revela URL assinada, tokens, cookies ou cabeçalhos sensíveis. | FR-3, FR-18, FR-19 |
 | AC-19 | Quando servidor local rejeita paralelismo, o produto reduz concorrência ou mostra aviso acionável; o Job persiste a condição e a escolha/resultante para `list` e retomada. | FR-7, FR-8, FR-19 |
+| AC-20 | Servidor local simula `1drv.ms` público cuja **primeira `Location` HTTPS** é exatamente `https://onedrive.live.com/redir?...`: só nessa situação o produto faz uma única tentativa em `/download`, preservando a query apenas em memória. Com `ithint=file`, somente `Content-Disposition: attachment` não HTML é aceito; com `ithint=folder`, somente `attachment` ZIP verificável por tipo/filename e, quando aplicável, conteúdo ZIP é aceito. 401/403, HTML, host/path fora da allowlist, `Content-Disposition` ausente/conflitante ou outra resposta ambígua não criam `.part`, não geram segunda URL sintética e não usam cookies/OAuth/Graph/Keychain/bypass; a CLI pede URL pública adequada. URLs da cadeia com query/tokens não aparecem em estado, `list`, logs ou mensagens. | FR-1, FR-2, FR-18, FR-19, FR-20 |
 
 ## 9. Riscos, tensões e mitigação
 
@@ -381,7 +403,7 @@ O servidor HTTP local controlado deve cobrir todo o conjunto AC-1 a AC-19. Além
 | --- | --- | --- |
 | Fonte anuncia ou responde intervalos de modo inconsistente, ou limita paralelismo | Corrupção, dados redundantes, falhas repetidas | Confirmar somente por 206/Content-Range; para 200/tamanho desconhecido usar Transferência Simples; para Content-Range inválido/416 persistir falha segura; reduzir concorrência ou avisar conforme FR-5 e FR-7. |
 | Fonte muda enquanto o Job está pausado | Corrupção silenciosa | Validar Identidade da Fonte antes de qualquer retomada; nunca combinar dados diferentes. |
-| URL de compartilhamento do OneDrive é página intermediária, exige sessão ou expira | MVP não consegue baixar ou retomar | Delimitar a Fonte direta e não autenticada; orientar URL nova quando aplicável; manter extensão/autenticação fora do MVP. |
+| Compatibilidade allowlisted de link público `1drv.ms`/OneDrive é confundida com API ou autorização | Produto poderia reescrever endpoints além do permitido, prometer acesso ou criar parcial de resposta indevida | Converter somente a primeira `Location` HTTPS com host exato `onedrive.live.com` e path exato `/redir` para `/download`, uma única vez e só em memória. Exigir `attachment` não HTML para item e ZIP verificável para pasta; HTML, 401/403, host/path fora da allowlist ou ambiguidade falham sem `.part`. Não usar cookies, OAuth, Graph, Keychain ou bypass. O exemplo de `ithint=folder` que retorna 403 sem sessão é acesso indisponível. |
 | URL assinada expira e não pode aparecer nem persistir em Estado Persistente | Retomada exige intervenção do usuário | Não usar Keychain no MVP; exigir `resume --url <nova-url>` e validar Identidade da Fonte antes de reaproveitar Segmentos. |
 | Queda de energia ou `Ctrl+C` durante gravação | Estado inconsistente ou arquivo considerado final | Persistência atômica, Arquivo Parcial separado e validação antes de Finalização. |
 | Retentativas excessivas agravam rate limiting | Bloqueio do servidor ou experiência ruim | Espera progressiva, jitter e respeito a `Retry-After`. |
@@ -392,11 +414,11 @@ O servidor HTTP local controlado deve cobrir todo o conjunto AC-1 a AC-19. Além
 | Marco | Resultado de planejamento/entrega | Itens prioritários | Condição de saída |
 | --- | --- | --- | --- |
 | M0 — Fechamento de discovery | Nota `downget-direcionamento-de` reconciliada sem alteração de escopo | Nenhum | Completo; especificação final liberada para arquitetura. |
-| M1 — Contrato de CLI e Job | Superfície de comandos, configuração global, destino, ciclo observável do Job e inspeção de Fonte especificados | FR-1 a FR-4, FR-12, FR-16, FR-19 | Arquitetura consegue definir armazenamento e máquina de estados sem inventar contrato. |
+| M1 — Contrato de CLI e Job | Superfície de comandos, configuração global, destino, ciclo observável do Job e inspeção de Fonte, incluindo `1drv.ms` público, especificados | FR-1 a FR-4, FR-12, FR-16, FR-19, FR-20 | Arquitetura consegue definir armazenamento e máquina de estados sem inventar contrato. |
 | M2 — Recuperação básica | Transferência Simples, Arquivo Parcial, Estado Persistente, orçamento de retry e retomada segura definidos | FR-6, FR-8 a FR-10, FR-13 a FR-15 | Testes locais cobrem queda, retry terminal, reinicialização sem Range e identidade da Fonte. |
 | M3 — Transferência Segmentada | Confirmação 206/Content-Range, Segmentos por offset, concorrência conservadora e retomada por URL substituta definidos | FR-5, FR-7, FR-11 | Cenários AC-1, AC-3 a AC-5, AC-14, AC-16 e AC-19 passam. |
-| M4 — Integridade, UX e privacidade | Finalização, SHA-256, mensagens, URL assinada e cancelamento ativo definidos | FR-12, FR-16 a FR-19 | Cenários AC-8, AC-10 a AC-12, AC-15, AC-17 e AC-18 passam. |
-| M5 — Pronto para build/test | Arquitetura aprovada, plano de testes local implementável e evidência para Sentinel definidos | NFR-1 a NFR-6, AC-1 a AC-19 | Gate de preparação aprova avanço para build; implementação ainda precisa passar o Sentinel. |
+| M4 — Integridade, UX e privacidade | Finalização, SHA-256, mensagens, URL efêmera, OneDrive público limitado e cancelamento ativo definidos | FR-12, FR-16 a FR-20 | Cenários AC-8, AC-10 a AC-12, AC-15, AC-17, AC-18 e AC-20 passam. |
+| M5 — Pronto para build/test | Arquitetura aprovada, plano de testes local implementável e evidência para Sentinel definidos | NFR-1 a NFR-6, AC-1 a AC-20 | Gate de preparação aprova avanço para build; implementação ainda precisa passar o Sentinel. |
 
 O backlog acima é sequencial porque confiabilidade de transferência depende da semântica de Estado Persistente e de Identidade da Fonte. Ele não é uma ordem para escrever código antes de M0 e da arquitetura.
 
@@ -404,11 +426,11 @@ O backlog acima é sequencial porque confiabilidade de transferência depende da
 
 ### Premissas confirmadas pelo handoff
 
-- O MVP é CLI-first, para macOS e para Fontes HTTP(S) diretas.
+- O MVP é CLI-first, para macOS e para Fontes HTTP(S) diretas, incluindo o fluxo público limitado de `1drv.ms`/OneDrive.
 - A prioridade é confiabilidade, não maximização de velocidade.
 - O padrão de concorrência é duas conexões; a faixa permitida é 1–8.
 - O arquivo final só pode ser promovido após verificações aplicáveis.
-- Captura em navegador, autenticação e OneDrive universal não pertencem ao MVP.
+- Captura em navegador, autenticação, API Graph, cookies, OAuth, Keychain, scraping de HTML e suporte universal a OneDrive não pertencem ao MVP; somente arquivo `attachment` não HTML ou ZIP `attachment` verificável de pasta são aceitos, inclusive na única tentativa best-effort allowlisted `onedrive.live.com/redir → /download`.
 - `cancel <ID>` pausa e preserva; `cancel <ID> --discard` é o único descarte, irreversível e explicitamente documentado.
 - URLs assinadas não usam Keychain no MVP; depois de expiração, `resume --url` é obrigatório e depende de validação da Identidade da Fonte.
 - SHA-256 entra somente por `--sha256 <64-hex>` em `add` ou `resume`, é normalizado e não pode ser substituído por valor diferente.
@@ -417,6 +439,7 @@ O backlog acima é sequencial porque confiabilidade de transferência depende da
 - `add` inicia o Job no processo atual; a configuração disponível é global em `config set concurrency <1..8>`.
 - URL assinada permanece somente em memória; após reinício de processo, `resume --url` é obrigatório mesmo sem 403.
 - Intervalos são confirmados somente por 206 com Content-Range coerente; o orçamento de retry é de cinco tentativas totais por requisição/Segmento.
+- Redirecionamento `1drv.ms`/OneDrive com query/tokens é classificado somente em memória; a única conversão permitida é a primeira `Location` HTTPS de host exato `onedrive.live.com` e path exato `/redir` para `/download`, sem persistir query. 401/403, acesso restrito, download bloqueado, HTML, host/path fora da allowlist ou resposta ambígua não podem ser contornados e exigem URL pública adequada.
 
 ## 12. Perguntas abertas indispensáveis
 

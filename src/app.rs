@@ -65,6 +65,9 @@ impl App {
                 return Err(error);
             }
         };
+        if let Some(item) = probe.one_drive_item {
+            eprintln!("{}", source::one_drive_classification_message(item));
+        }
         let destination = resolve_destination(output, probe.filename.as_deref(), id)?;
         let part_path = part_path(&destination);
         if destination.exists() || part_path.exists() {
@@ -159,6 +162,9 @@ impl App {
                 ))
             })?;
         let probe = source::probe(&self.client, &url).await?;
+        if let Some(item) = probe.one_drive_item {
+            eprintln!("{}", source::one_drive_classification_message(item));
+        }
         let stored_identity = SourceIdentity {
             size: job.size,
             etag: job.etag.clone(),
@@ -279,7 +285,7 @@ impl App {
                     Ok(())
                 }
             }
-            TransferOutcome::AwaitingUrl => {
+            TransferOutcome::AwaitingUrl { one_drive_public } => {
                 self.store.require_replacement_url(job.id)?;
                 self.store.set_state(
                     job.id,
@@ -287,8 +293,13 @@ impl App {
                     Some("awaiting_url"),
                     Some("forneça uma nova URL"),
                 )?;
+                let guidance = if one_drive_public {
+                    source::one_drive_access_message()
+                } else {
+                    "a fonte retornou 403; forneça uma nova URL válida"
+                };
                 Err(Error::User(format!(
-                    "a fonte retornou 403. Use `downget resume {} --url <NOVA_URL>`",
+                    "{guidance} Use `downget resume {} --url <NOVA_URL>`",
                     job.id
                 )))
             }

@@ -4,15 +4,15 @@
 
 Este arquivo permanece a **fonte canônica de entrega** do downget. O documento complementar [PRD do downget](docs/planning/prd-downget-2026-07-26/prd.md) traduz o escopo abaixo em requisitos verificáveis, prioridades, riscos e marcos; ele não substitui as decisões válidas deste handoff.
 
-- **Estado do PRD e arquitetura:** especificação final e [arquitetura implementável do MVP](docs/architecture.md) aprovadas e implementadas. As decisões de cancelamento, URLs assinadas, checksum, fontes sem Range, nome de destino, Range, retry, configuração, persistência, coordenação entre processos e testes locais foram incorporadas.
-- **Fluxo Software Forge:** discovery → especificação → arquitetura → build → teste. Todas as etapas do MVP foram concluídas, incluindo a matriz de evidências AC-1 a AC-19.
-- **Gate Sentinel:** aprovado em 2026-07-26 após reprodução independente de formatação, 42 testes automatizados (12 unitários e 30 de integração) e lint estrito; o cenário crítico de SIGINT seguido de retomada foi repetido cinco vezes após a correção de durabilidade.
+- **Estado do PRD e arquitetura:** especificação final e [arquitetura implementável do MVP](docs/architecture.md) incorporam também o suporte público e sem sessão a `1drv.ms`/OneDrive: classificação segura de arquivo/pasta e uma única tentativa de compatibilidade allowlisted `onedrive.live.com/redir → /download`, com AC-20.
+- **Fluxo Software Forge:** discovery → especificação → arquitetura → build → teste. A matriz AC-1 a AC-20 foi evidenciada sem ampliar o acesso permitido pelo provedor.
+- **Gate Sentinel:** aprovado em 2026-07-27 após a validação independente do AC-20, incluindo 57 testes automatizados (22 unitários e 35 de integração), lint estrito, canário seguro do link OneDrive e verificação de assinatura ZIP de quatro bytes para pastas.
 - **Nota conectada:** `downget-direcionamento-de` foi reconciliada e não alterou o escopo canônico.
 
 
 ## Objetivo
 
-Construir um downloader de linha de comando para macOS, confiável para arquivos grandes e conexões instáveis. O programa deve baixar arquivos HTTP(S) em blocos paralelos quando o servidor suportar `Range Requests`, persistir o progresso em disco e retomar apenas os blocos ausentes após interrupções.
+Construir um downloader de linha de comando para macOS, confiável para arquivos grandes e conexões instáveis. O programa deve baixar arquivos HTTP(S) diretos — inclusive links públicos `1drv.ms`/OneDrive que se resolvam com segurança para arquivo direto ou ZIP de pasta — em blocos paralelos quando o servidor suportar `Range Requests`, persistir o progresso em disco e retomar apenas os blocos ausentes após interrupções.
 
 O produto é **CLI-first**: não haverá interface gráfica. A experiência deve ser clara no terminal, com barras de progresso, velocidade, ETA, conexões ativas e erros compreensíveis.
 
@@ -23,8 +23,8 @@ Downloads grandes iniciados no navegador estão sendo interrompidos e nem sempre
 Pontos importantes:
 
 - Dividir o arquivo em partes pode acelerar transferências, mas não deve vir antes da estabilidade. Alguns servidores limitam muitas conexões paralelas.
-- Links de compartilhamento do OneDrive podem ser páginas intermediárias, depender de sessão/cookies ou expirar. Nenhum cliente HTTP consegue retomar um link expirado sem receber uma URL válida nova.
-- O primeiro objetivo é um downloader robusto para URLs diretas. Captura automática no navegador é uma segunda fase.
+- Links públicos `1drv.ms`/OneDrive podem redirecionar com `ithint=file` ou `ithint=folder`, mas ainda podem terminar em landing page HTML, exigir sessão ou ter download bloqueado. Redirecionamento classifica o tipo; a única compatibilidade permitida é a conversão estritamente allowlisted de `onedrive.live.com/redir` para `/download`, que não concede acesso nem é uma API garantida.
+- O primeiro objetivo é um downloader robusto para URLs diretas e para o fluxo público limitado de `1drv.ms`; captura automática no navegador é uma segunda fase.
 
 ## Escopo do MVP
 
@@ -51,6 +51,7 @@ Comportamentos esperados:
 9. Para Job ativo, `downget cancel <id>` confirma a parada das requisições em andamento, persiste o estado e então pausa, preservando `.part` e metadados. O descarte ocorre somente em `downget cancel <id> --discard`; a presença de `--discard` é a confirmação explícita, a operação é irreversível e deve ser documentada. Em Job ativo, descarte só acontece após a parada ser confirmada; se ela não puder ser confirmada, nenhum dado é descartado.
 10. Após falha definitiva de Fonte sem Range, preservar parcial e estado até `resume`. Nesse comando, informar que a retomada por bytes não é possível, descartar o parcial antigo com segurança e reiniciar a Transferência Simples do zero automaticamente.
 11. URL assinada fica somente em memória. Após qualquer reinício de processo de Job, `resume <id>` exige `--url <nova-url>` mesmo sem 403; o Estado Persistente guarda somente marcador/redação da URL. A nova Fonte precisa passar na validação de identidade antes de reaproveitar Segmentos.
+12. Para um link público `1drv.ms`/OneDrive, seguir a cadeia de redirecionamentos e classificá-lo em memória por `ithint=file` ou `ithint=folder`. Há uma única tentativa best-effort de compatibilidade: **somente a primeira `Location` HTTPS observada na cadeia**, se tiver host exato `onedrive.live.com` e path exato `/redir`, pode ter apenas o path canônico convertido para `/download`; a query original acompanha essa tentativa somente em memória. Nenhum outro host/path é reescrito nem há segunda tentativa sintética; isto não é API garantida. Para arquivo, sucesso exige resposta pública não HTML com `Content-Disposition: attachment`. Para pasta, exige `attachment` de ZIP verificável por tipo/filename e, quando houver corpo/amostra aplicável, por conteúdo ZIP. `401`/`403`, HTML, host/path fora da allowlist ou resposta ambígua falham antes de criar `.part`. Não tentar cookies, OAuth, API Graph, Keychain ou bypass: orientar o usuário a tornar o compartilhamento público/habilitar download e fornecer URL direta do arquivo ou URL pública do ZIP da pasta. URLs intermediárias, inclusive query/tokens preservados para a tentativa, são efêmeras, redigidas e nunca persistidas ou exibidas.
 
 ## Experiência de terminal
 
@@ -96,15 +97,16 @@ Segment
 
 Os segmentos devem escrever em offsets definidos do mesmo `.part`, sem concatenar arquivos ao final. Persistir o progresso de forma atômica após blocos concluídos e em intervalos curtos durante transferências longas.
 
-## OneDrive e autenticação
+## OneDrive público e autenticação
 
-Não prometer suporte universal a links do OneDrive no MVP.
+O MVP suporta somente o fluxo público e sem sessão de `1drv.ms`/OneDrive; não promete suporte universal.
 
-- Uma URL de página de compartilhamento não é necessariamente a URL direta do arquivo.
-- Links diretos assinados ficam somente em memória e não vão ao Keychain nem ao Estado Persistente. Após qualquer reinício de processo, `resume --url <nova-url>` é obrigatório, mesmo sem 403, e reaproveita somente os segmentos cuja identidade do arquivo ainda coincida.
-- URLs que exigem cookies, `Authorization` ou outros headers ficam fora do MVP inicial.
+- A cadeia de redirecionamento é inspecionada em memória para classificar `ithint=file` e `ithint=folder`. A única inferência permitida é uma tentativa de compatibilidade: se a **primeira `Location` HTTPS** tiver exatamente host `onedrive.live.com` e path `/redir`, `SourceProbe` pode trocar somente esse path por `/download`, preservando query apenas em memória. Não há conversão de outra `Location`, outro host/path ou tentativa sintética posterior; não é uma API garantida.
+- Para item, a tentativa só é aceita se a resposta for `Content-Disposition: attachment` e não HTML. Para pasta, só é aceita se for `attachment` ZIP verificável por tipo/filename e, quando aplicável, conteúdo ZIP. Landing page HTML, resposta ambígua, host/path fora da allowlist, 401/403, compartilhamento restrito, download desabilitado ou qualquer exigência de cookies, `Authorization`, OAuth, API Graph ou Keychain interrompe antes de criar `.part`, sem fallback autenticado: tornar o link público e habilitar download, então fornecer URL direta do arquivo ou URL pública do ZIP da pasta.
+- O exemplo observado que redireciona com `ithint=folder` e retorna 403 sem sessão é tratado como pasta inacessível: ele não prova acesso e não autoriza bypass.
+- URLs diretas assinadas ou intermediárias com query/tokens — inclusive a query preservada na tentativa `/redir → /download` — ficam somente em memória e não vão ao Keychain nem ao Estado Persistente. Após qualquer reinício de processo, `resume --url <nova-url>` é obrigatório, mesmo sem 403, e reaproveita somente os segmentos cuja identidade do arquivo ainda coincida.
 
-Fase posterior: extensão Chrome mínima + Native Messaging. A extensão captura a URL final e, quando necessário, cookies/headers permitidos pelo usuário, entregando-os ao CLI local. Não registrar nem exibir cookies, tokens ou URLs assinadas em logs. Restringir o host nativo ao ID da extensão e guardar segredos no Keychain do macOS, se forem persistidos.
+Fase posterior (fora do MVP e jamais fallback da tentativa compatível OneDrive): extensão Chrome mínima + Native Messaging. A extensão captura a URL final e, quando necessário, cookies/headers permitidos pelo usuário, entregando-os ao CLI local. Não registrar nem exibir cookies, tokens ou URLs assinadas em logs. Restringir o host nativo ao ID da extensão e guardar segredos no Keychain do macOS, se forem persistidos.
 
 ## Não escopo inicial
 
@@ -112,6 +114,7 @@ Fase posterior: extensão Chrome mínima + Native Messaging. A extensão captura
 - extensão de navegador;
 - BitTorrent, HLS, FTP, SFTP ou download de vídeo;
 - login OAuth/integração com a API do OneDrive;
+- cookies, `Authorization`, scraping de landing page HTML ou bypass de compartilhamento/controle de download do OneDrive;
 - múltiplas URLs espelho para o mesmo arquivo;
 - execução como serviço em segundo plano.
 
@@ -142,7 +145,7 @@ downget/
 2. Implementar arquivo `.part`, metadados e retomada sequencial por Range.
 3. Implementar segmentação fixa de 2 conexões, escrita por offset e persistência de segmentos.
 4. Adicionar política de retry, cancelamento seguro e mensagens de erro.
-5. Adicionar testes com servidor HTTP local que simule: suporte/ausência de Range, queda no meio da transferência, 429/503, ETag alterado e arquivo corrompido.
+5. Adicionar testes com servidor HTTP local que simule: suporte/ausência de Range, queda no meio da transferência, 429/503, ETag alterado, arquivo corrompido e `1drv.ms`/OneDrive com a primeira `Location` HTTPS allowlisted para `/redir`, arquivo `attachment` não HTML, ZIP `attachment` verificável, HTML, 401/403, host/path fora da allowlist e resposta ambígua sem `.part`.
 6. Documentar instalação e exemplos no README.
 
 ## Critérios de aceite do MVP
@@ -152,6 +155,7 @@ downget/
 - Após falha de rede simulada, retoma automaticamente e conclui sem corromper o arquivo.
 - Quando o servidor não suporta Range, deixa isso claro e não finge que poderá retomar.
 - Não expõe tokens, cookies, headers sensíveis ou URLs assinadas em saída padrão, logs ou arquivos de estado.
+- Para `1drv.ms`/OneDrive público, aceita somente o arquivo `attachment` não HTML ou ZIP `attachment` verificável de pasta, inclusive pela única tentativa allowlisted `/redir → /download`; HTML, 401/403, host/path fora da allowlist ou resposta ambígua não criam `.part` e recebem orientação clara, sem autenticação ou bypass.
 - `cargo test` cobre os cenários de retomada e falha essenciais.
 
 ## Decisão de produto
